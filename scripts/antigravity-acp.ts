@@ -256,10 +256,12 @@ function waitDone(
 
     let readyTimer: ReturnType<typeof setTimeout>;
 
+    let sawInitialSnapshot = false;
+
     ws.on('open', () => {
       ws.send(JSON.stringify({ type: 'subscribe', cascadeId: session.cascadeId }));
-      // Fallback: if no initial WS snapshot arrives within 2s, trigger onReady anyway
-      readyTimer = setTimeout(() => { triggerReady(); }, 2000);
+      // Fallback: if no initial WS snapshot arrives within 8s, trigger onReady anyway
+      readyTimer = setTimeout(() => { triggerReady(); }, 8000);
     });
 
     ws.on('message', async (raw: Buffer) => {
@@ -273,15 +275,27 @@ function waitDone(
         }
         if (m.cascadeId !== session.cascadeId) return;
 
-        // First message is the initial snapshot before our prompt is sent
-        if (!readySent) {
-          startStepIndex = m.data?.steps?.length ?? m.stepCount ?? 0;
-          await triggerReady();
-          return;
+        // First steps snapshot records baseline index so we never replay old history
+        if (!sawInitialSnapshot && (m.type === 'steps' || typeof m.stepCount === 'number')) {
+          sawInitialSnapshot = true;
+          const totalLen = m.data?.steps?.length ?? m.stepCount ?? 0;
+          startStepIndex = readySent ? Math.max(0, totalLen - 2) : totalLen;
+          if (!readySent) {
+            await triggerReady();
+            return;
+          }
         }
 
         if (m.type === 'steps' && Array.isArray(m.data?.steps)) {
           const steps: any[] = m.data.steps;
+          // Extra guard: never replay steps earlier than the latest USER_INPUT
+          for (let i = steps.length - 1; i >= startStepIndex; i--) {
+            const st = (steps[i]?.type || '').replace('CORTEX_STEP_TYPE_', '');
+            if (st === 'USER_INPUT') {
+              startStepIndex = i + 1;
+              break;
+            }
+          }
           for (let idx = startStepIndex; idx < steps.length; idx++) {
             const s = steps[idx];
             if (!s?.type) continue;
